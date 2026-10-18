@@ -23,6 +23,12 @@
         "default": 30,
         "hint": "最近 N 天在本会话说过话的人才进名册。"
     },
+    "note_inject_enabled": {
+        "description": "📝 把管理员备注注入名册",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，/备注 手写的内容会跟随名册进入 system prompt。注意：模型可能把备注内容说出来，所以别写敏感信息。关闭后模型只能从 /谁 的回复里看到备注，不再常驻上下文。"
+    },
     "placeholder_prefix": {
         "description": "未知名字时的占位前缀",
         "type": "text",

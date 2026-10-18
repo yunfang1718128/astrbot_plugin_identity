@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -135,6 +136,57 @@ def test_forget_and_roster(store: IdentityStore, identity_id: int) -> None:
     check("删除后名册为空", store.roster(GROUP_A, 0, 20), [])
 
 
+def test_note(store: IdentityStore, identity_id: int) -> None:
+    section("管理员备注")
+    check("默认无备注", store.get_identity(identity_id)["note"], None)
+
+    store.set_note(identity_id, "服务器主人，爱考 MC 知识")
+    check(
+        "写入后读得到",
+        store.get_identity(identity_id)["note"],
+        "服务器主人，爱考 MC 知识",
+    )
+
+    roster = store.roster(GROUP_A, 0, 20)
+    check("名册里带备注", roster[0]["note"], "服务器主人，爱考 MC 知识")
+
+    store.set_note(identity_id, None)
+    check("清空后为 None", store.get_identity(identity_id)["note"], None)
+
+
+def test_migration() -> None:
+    """旧库（无 note 列）升级后不能丢数据。"""
+    section("旧库迁移")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "old.db")
+        old = sqlite3.connect(path)
+        old.executescript(
+            "CREATE TABLE identities (\n"
+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+            "    primary_name TEXT NOT NULL,\n"
+            "    source INTEGER NOT NULL DEFAULT 0,\n"
+            "    created_at REAL NOT NULL,\n"
+            "    last_seen REAL NOT NULL\n"
+            ");"
+        )
+        old.execute(
+            "INSERT INTO identities(primary_name,source,created_at,last_seen)"
+            " VALUES('老用户',1,0,0)"
+        )
+        old.commit()
+        old.close()
+
+        migrated = IdentityStore(path)
+        try:
+            card = migrated.get_identity(1)
+            check("旧数据保留", card["primary_name"], "老用户")
+            check("note 列自动补上", card["note"], None)
+            migrated.set_note(1, "迁移后可用")
+            check("迁移后可写备注", migrated.get_identity(1)["note"], "迁移后可用")
+        finally:
+            migrated.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "identity.db")
@@ -145,11 +197,13 @@ def main() -> None:
             test_name_rules(store, identity_id)
             test_resolve(store, identity_id)
             test_merge_undo(store, identity_id)
+            test_note(store, identity_id)
             test_forget_and_roster(store, identity_id)
             section("统计")
             print(" ", store.stats())
         finally:
             store.close()
+    test_migration()
     print("\n全部通过")
 
 

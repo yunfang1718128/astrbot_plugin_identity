@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS identities (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     primary_name TEXT NOT NULL,
     source       INTEGER NOT NULL DEFAULT 0,
+    note         TEXT,
     created_at   REAL NOT NULL,
     last_seen    REAL NOT NULL
 );
@@ -123,9 +124,28 @@ class IdentityStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """向旧库补齐新增字段，保证升级不丢数据。"""
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(identities)")
+        }
+        if "note" not in columns:
+            self.conn.execute("ALTER TABLE identities ADD COLUMN note TEXT")
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def set_note(self, identity_id: int, note: str | None) -> bool:
+        """设置/清空管理员手写备注。返回是否影响到了行。"""
+        cur = self.conn.execute(
+            "UPDATE identities SET note=? WHERE id=?", (note or None, identity_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------ 群
     def touch_group(self, group_openid: str, name: str | None = None) -> None:
@@ -304,6 +324,7 @@ class IdentityStore:
             "id": int(ident["id"]),
             "primary_name": ident["primary_name"],
             "source": int(ident["source"]),
+            "note": ident["note"],
             "created_at": ident["created_at"],
             "last_seen": ident["last_seen"],
             "names": [(row["name"], int(row["source"])) for row in names],
@@ -531,7 +552,7 @@ class IdentityStore:
     def roster(self, scope: str, since: float, limit: int) -> list[dict[str, Any]]:
         """取某会话最近活跃的成员，按 identity id 排序以保证前缀稳定。"""
         rows = self.conn.execute(
-            "SELECT a.openid, i.id, i.primary_name FROM accounts a"
+            "SELECT a.openid, i.id, i.primary_name, i.note FROM accounts a"
             " JOIN identities i ON i.id=a.identity_id"
             " WHERE a.scope=? AND a.last_seen>=?"
             " ORDER BY i.id LIMIT ?",
@@ -552,6 +573,7 @@ class IdentityStore:
                     "identity_id": int(row["id"]),
                     "openid": row["openid"],
                     "name": row["primary_name"],
+                    "note": row["note"],
                     "aliases": aliases,
                 }
             )

@@ -84,12 +84,20 @@ class IdentityPlugin(Star):
         head = f"#{identity['id']} {identity['primary_name']}"
         if aliases:
             head += f"（别名：{aliases}）"
+        if identity.get("note"):
+            head += f"｜备注：{identity['note']}"
         scopes = "，".join(
             f"{'私聊' if scope == SCOPE_PRIVATE else scope[:8]}={self._short(openid)}"
             for scope, openid, _ in identity["accounts"][:4]
         )
         source = SOURCE_LABEL.get(identity["source"], str(identity["source"]))
         return f"{head}｜{scopes}｜名字来源：{source}"
+
+    def _note_suffix(self, note: str | None) -> str:
+        """备注进提示词前截断，避免 token 失控。"""
+        if not note or not self.config.get("note_inject_enabled", True):
+            return ""
+        return f"｜{note[:30]}"
 
     # ------------------------------------------------------------ 被动学习
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -141,6 +149,7 @@ class IdentityPlugin(Star):
                     lines.append(
                         f"当前对话者：{own['primary_name']}"
                         + (f"（别名：{aliases}）" if aliases else "")
+                        + self._note_suffix(own.get("note"))
                     )
             else:
                 days = int(self.config.get("roster_days", 30))
@@ -150,6 +159,7 @@ class IdentityPlugin(Star):
                     line = f"{self._short(item['openid'])}={item['name']}"
                     if item["aliases"]:
                         line += f"（别名：{'、'.join(item['aliases'])}）"
+                    line += self._note_suffix(item.get("note"))
                     lines.append(line)
                 if own_id and all(
                     not line.startswith(self._short(openid)) for line in lines
@@ -357,6 +367,48 @@ class IdentityPlugin(Star):
         restored = self.store.get_identity(payload["drop"]["id"])
         yield event.plain_result(
             f"已回滚，拆回：{self._card(restored) if restored else payload['drop']['primary_name']}"
+        )
+
+    @filter.command("备注")
+    async def set_note(self, event: AstrMessageEvent):
+        """管理员：查看 / 设置 / 清空某人的一句备注。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能写备注。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result(
+                "用法：/备注 <名字或短码>          查看\n"
+                "      /备注 <名字或短码> <一句话>  设置\n"
+                "      /备注 <名字或短码> -        清空"
+            )
+            return
+        target = argv[0]
+        candidates = self.store.resolve(target)
+        if not candidates:
+            yield event.plain_result(f"没找到「{target}」。")
+            return
+        if len(candidates) > 1:
+            cards = [self._card(self.store.get_identity(cid)) for cid in candidates[:6]]
+            yield event.plain_result(
+                "匹配到多个人，请用 #编号 指定：\n" + "\n".join(cards)
+            )
+            return
+        identity_id = candidates[0]
+        card = self.store.get_identity(identity_id)
+        if len(argv) == 1:
+            note = (card.get("note") or "（暂无备注）") if card else "（暂无备注）"
+            yield event.plain_result(f"{card['primary_name']} 的备注：{note}")
+            return
+        content = " ".join(argv[1:]).strip()
+        if content in ("-", "清空", "删除"):
+            self.store.set_note(identity_id, None)
+            yield event.plain_result(f"已清空「{card['primary_name']}」的备注。")
+            return
+        self.store.set_note(identity_id, content[:60])
+        yield event.plain_result(
+            f"已记下「{card['primary_name']}」的备注：{content[:60]}\n"
+            "（备注会随名册注入给模型，模型可能把它说出来，注意别写敏感信息）"
         )
 
     @filter.command("忘记")

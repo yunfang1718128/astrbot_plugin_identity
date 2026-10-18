@@ -31,6 +31,7 @@ QQ 号稳定、昵称总能拿到。**本插件面向的是拿不到昵称的场
 - **脏名过滤**：自动丢弃「昵称等于 openid」「`[At:xxx]`」这类污染值
 - **跨群合并**：`/合并` + `/撤销`，破坏性操作可回滚
 - **名册注入**：只注入本会话活跃成员，默认 20 人约 300 tokens
+- **手写备注**：`/备注` 给某人写一句话（如「服务器主人，爱考 MC 知识」），随名册注入
 - **数据删除权**：`/忘记` 彻底删除某人记录
 
 ## 安装
@@ -58,6 +59,7 @@ git clone https://github.com/yunfang1718128/astrbot_plugin_identity
 | `/群列表` | 管理员 | 已知群 + 各自认识多少人 |
 | `/谁 <名字/短码/#编号>` | 管理员 | 查身份卡 |
 | `/合并 <A> <B>` | 管理员 | 把两个身份合并成一个人 |
+| `/备注 <名字> [内容]` | 管理员 | 查看/设置/清空一句话备注；省略内容=查看，`-`=清空 |
 | `/撤销` | 管理员 | 回滚最近一次合并 |
 | `/忘记 <名字/短码/#编号>` | 管理员 | 彻底删除某人记录 |
 
@@ -85,6 +87,7 @@ git clone https://github.com/yunfang1718128/astrbot_plugin_identity
 | `inject_enabled` | `true` | 是否把名册注入 system prompt |
 | `roster_max` | `20` | 名册人数上限 |
 | `roster_days` | `30` | 多久没说话就不算活跃 |
+| `note_inject_enabled` | `true` | 备注是否随名册注入 system prompt |
 | `placeholder_prefix` | `群友-` | 无名字时的占位前缀 |
 | `protected_ids` | `[]` | 不记录名单（openid），命中者完全不参与 |
 
@@ -111,11 +114,13 @@ git clone https://github.com/yunfang1718128/astrbot_plugin_identity
 
 ## 隐私
 
-- **只存** `openid`、昵称、首次/最近出现时间；**不存聊天内容**
+- **只存** `openid`、昵称、备注、首次/最近出现时间；**不存聊天内容**
 - 数据位置：`data/plugin_data/astrbot_plugin_identity/identity.db`
 - 随时可用 `/忘记` 删除某人全部记录
 - 可用 `protected_ids` 让指定用户完全不被记录
 - 卸载插件后删除该 `.db` 文件即彻底清空
+- ⚠️ **备注会被注入给模型**，模型可能把内容说出来。不要写密码、地址、真实姓名等敏感信息；
+  不想要这个行为就把 `note_inject_enabled` 关掉。
 
 ## 已知限制
 
