@@ -1,7 +1,7 @@
 """认人本自测：零第三方依赖，直接 ``python tests/test_store.py`` 运行。
 
 覆盖：脏名过滤、跨 scope 自动归并、改名不覆盖主名、来源等级升级、三种解析方式、
-合并与撤销、删除、名册生成。任何一项失败都会抛 AssertionError 并以非零码退出。
+合并与撤销、删除、名册生成、管理员别名。任何一项失败都会抛 AssertionError 并以非零码退出。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from store import (  # noqa: E402
     SOURCE_SELF,
     IdentityStore,
     is_openid_like,
+    valid_alias,
     valid_name,
 )
 
@@ -157,6 +158,66 @@ def test_note(store: IdentityStore, identity_id: int) -> None:
     check("清空后为 None", store.get_identity(identity_id)["note"], None)
 
 
+def test_alias(store: IdentityStore, identity_id: int) -> None:
+    section("管理员别名")
+    card = store.get_identity(identity_id)
+    check("默认无别名", card["alias"], None)
+    check("display_name 回落主名", card["display_name"], card["primary_name"])
+
+    check("合法别名", valid_alias("云帆"), "云帆")
+    check("超长别名被拒", valid_alias("一二三四五六七八九十一二三"), None)
+    check("多行别名被拒", valid_alias("云\n帆"), None)
+    check("纯 hex 别名被拒", valid_alias("0123ABCD"), None)
+    check("平台兜底值不能当别名", valid_alias("N/A"), None)
+
+    store.set_alias(identity_id, "云帆")
+    card = store.get_identity(identity_id)
+    check("别名写入", card["alias"], "云帆")
+    check("display_name 用别名", card["display_name"], "云帆")
+    check("主名不变", card["primary_name"], "云帆大人")
+
+    check("按别名解析", store.resolve("云帆"), [identity_id])
+    check("别名占用检测", store.alias_owner("云帆"), identity_id)
+    check("排除自己不算占用", store.alias_owner("云帆", exclude_id=identity_id), None)
+
+    roster = store.roster(GROUP_A, 0, 20)
+    item = next(r for r in roster if r["identity_id"] == identity_id)
+    check("名册用别名", item["name"], "云帆")
+    check("名册保留真名", item["real_name"], "云帆大人")
+    check("有别名不再附曾用名", item["aliases"], [])
+
+    check("别名列表", [o["alias"] for o in store.list_aliases()], ["云帆"])
+
+    # 昵称继续变不能把别名冲掉（别名是独立字段，不进名字历史）
+    store.record_name(identity_id, "又换了个长名字", 1)
+    check("改名后别名仍在", store.get_identity(identity_id)["alias"], "云帆")
+    names_before = len(store.get_identity(identity_id)["names"])
+    store.set_alias(identity_id, "豆豆")
+    check("别名不写进名字历史", len(store.get_identity(identity_id)["names"]), names_before)
+    store.set_alias(identity_id, "云帆")
+
+    store.set_alias(identity_id, None)
+    check("清空别名", store.get_identity(identity_id)["alias"], None)
+    store.set_alias(identity_id, "云帆")
+
+
+def test_alias_merge(store: IdentityStore, identity_id: int) -> None:
+    section("合并时别名处理")
+    other_id, _ = store.touch_account(PLATFORM, GROUP_B, USER_B, "另一个很长很长的名字")
+    store.set_alias(other_id, "老王")
+    keep, drop = min(identity_id, other_id), max(identity_id, other_id)
+    store.merge(keep, drop, "test:admin")
+    # 双方都有别名时，保留 keep 自己的，不被合并方覆盖
+    expect_keep_alias = "云帆" if keep == identity_id else "老王"
+    check("合并保留自己的别名", store.get_identity(keep)["alias"], expect_keep_alias)
+
+    store.undo_last("test:admin")
+    expect_drop_alias = "云帆" if drop == identity_id else "老王"
+    check("撤销恢复被合并方别名", store.get_identity(drop)["alias"], expect_drop_alias)
+    check("撤销后 keep 别名不变", store.get_identity(keep)["alias"], expect_keep_alias)
+    store.forget(other_id)
+
+
 def test_migration() -> None:
     """旧库（无 note 列）升级后不能丢数据。"""
     section("旧库迁移")
@@ -186,6 +247,9 @@ def test_migration() -> None:
             check("note 列自动补上", card["note"], None)
             migrated.set_note(1, "迁移后可用")
             check("迁移后可写备注", migrated.get_identity(1)["note"], "迁移后可用")
+            check("alias 列自动补上", migrated.get_identity(1)["alias"], None)
+            migrated.set_alias(1, "老用户")
+            check("迁移后可写别名", migrated.get_identity(1)["display_name"], "老用户")
         finally:
             migrated.close()
 
@@ -201,6 +265,8 @@ def main() -> None:
             test_resolve(store, identity_id)
             test_merge_undo(store, identity_id)
             test_note(store, identity_id)
+            test_alias(store, identity_id)
+            test_alias_merge(store, identity_id)
             test_forget_and_roster(store, identity_id)
             section("统计")
             print(" ", store.stats())

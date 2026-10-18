@@ -1,6 +1,6 @@
 name: "astrbot_plugin_identity"
 display_name: "认人本"
-short_desc: "记住谁是谁：openid ↔ 人名的持久映射，专治拿不到昵称的平台"
+short_desc: "记住谁是谁：openid ↔ 人名的持久映射 + 短别名，专治拿不到昵称的平台"
 desc: |
   让 AstrBot 真正「记住」谁是谁，而不是每轮都靠昵称猜。
 
@@ -19,13 +19,15 @@ desc: |
     `/合并` 与 `/撤销` 让管理员手动指认
   - **名册注入**：只注入本会话活跃成员（默认 20 人，约 300 tokens），
     写进 system prompt 前缀，DeepSeek 等支持 prompt cache 的模型能命中
+  - **短别名**：管理员可给任何人设 1~12 字的别名，长昵称不再塞满提示词，
+    别名同时可用于 `/谁` `/备注` `/合并` `/忘记`
 
   **数据与隐私**
 
   只存 `openid`、昵称、首次/最近出现时间，**不存任何聊天内容**。
   数据落在 `data/plugin_data/astrbot_plugin_identity/identity.db`，
   管理员可随时用 `/忘记` 彻底删除某人记录，也可在配置里加「不记录名单」。
-version: "1.1.3"
+version: "1.2.0"
 author: "yunfang1718128"
 repo: https://github.com/yunfang1718128/astrbot_plugin_identity
 astrbot_version: ">=4.9.2"
@@ -38,6 +40,7 @@ social_link: https://github.com/yunfang1718128
 tags:
   - 认人
   - 身份识别
+  - 别名
   - 昵称
   - openid
   - QQ官方

@@ -29,9 +29,11 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
 
 from .store import (
+    ALIAS_MAX_CHARS,
     SOURCE_ADMIN,
     SOURCE_LABEL,
     IdentityStore,
+    valid_alias,
 )
 
 PLUGIN_NAME = "astrbot_plugin_identity"
@@ -78,12 +80,23 @@ class IdentityPlugin(Star):
     def _short(openid: str) -> str:
         return openid[:8]
 
+    @staticmethod
+    def _display(identity: dict[str, Any] | None, fallback: str = "（未知）") -> str:
+        """展示/注入用名字：设了管理员别名就用别名，否则用主名。"""
+        if not identity:
+            return fallback
+        return identity.get("alias") or identity["primary_name"]
+
     def _card(self, identity: dict[str, Any]) -> str:
         """把身份渲染成一行人类可读的卡。"""
         aliases = "、".join(identity["aliases"][:4])
-        head = f"#{identity['id']} {identity['primary_name']}"
-        if aliases:
-            head += f"（别名：{aliases}）"
+        if identity.get("alias"):
+            head = f"#{identity['id']} {identity['alias']}（原名：{identity['primary_name']}"
+            head += f"｜曾用名：{aliases}）" if aliases else "）"
+        else:
+            head = f"#{identity['id']} {identity['primary_name']}"
+            if aliases:
+                head += f"（曾用名：{aliases}）"
         if identity.get("note"):
             head += f"｜备注：{identity['note']}"
         scopes = "，".join(
@@ -145,12 +158,11 @@ class IdentityPlugin(Star):
                 # 私聊没有昵称，唯一有用的是「当前这个人是谁」
                 own = self.store.get_identity(own_id) if own_id else None
                 if own is not None and own["source"] > 0:
-                    aliases = "、".join(own["aliases"][:3])
-                    lines.append(
-                        f"当前对话者：{own['primary_name']}"
-                        + (f"（别名：{aliases}）" if aliases else "")
-                        + self._note_suffix(own.get("note"))
-                    )
+                    head = f"当前对话者：{self._display(own)}"
+                    # 有别名时不再附长昵称/曾用名：那正是要省掉的部分。
+                    if not own.get("alias") and own["aliases"]:
+                        head += f"（曾用名：{'、'.join(own['aliases'][:3])}）"
+                    lines.append(head + self._note_suffix(own.get("note")))
             else:
                 days = int(self.config.get("roster_days", 30))
                 limit = int(self.config.get("roster_max", 20))
@@ -158,7 +170,7 @@ class IdentityPlugin(Star):
                 for item in self.store.roster(scope, since, limit):
                     line = f"{self._short(item['openid'])}={item['name']}"
                     if item["aliases"]:
-                        line += f"（别名：{'、'.join(item['aliases'])}）"
+                        line += f"（曾用名：{'、'.join(item['aliases'])}）"
                     line += self._note_suffix(item.get("note"))
                     lines.append(line)
                 if own_id and all(
@@ -167,7 +179,7 @@ class IdentityPlugin(Star):
                     own = self.store.get_identity(own_id)
                     if own is not None:
                         lines.append(
-                            f"{self._short(openid)}={own['primary_name']}（当前发言人）"
+                            f"{self._short(openid)}={self._display(own)}（当前发言人）"
                         )
 
             if lines:
@@ -398,17 +410,91 @@ class IdentityPlugin(Star):
         card = self.store.get_identity(identity_id)
         if len(argv) == 1:
             note = (card.get("note") or "（暂无备注）") if card else "（暂无备注）"
-            yield event.plain_result(f"{card['primary_name']} 的备注：{note}")
+            yield event.plain_result(f"{self._display(card)} 的备注：{note}")
             return
         content = " ".join(argv[1:]).strip()
         if content in ("-", "清空", "删除"):
             self.store.set_note(identity_id, None)
-            yield event.plain_result(f"已清空「{card['primary_name']}」的备注。")
+            yield event.plain_result(f"已清空「{self._display(card)}」的备注。")
             return
         self.store.set_note(identity_id, content[:60])
         yield event.plain_result(
-            f"已记下「{card['primary_name']}」的备注：{content[:60]}\n"
+            f"已记下「{self._display(card)}」的备注：{content[:60]}\n"
             "（备注会随名册注入给模型，模型可能把它说出来，注意别写敏感信息）"
+        )
+
+    @filter.command("别名")
+    async def set_alias(self, event: AstrMessageEvent):
+        """管理员：给某人设一个短别名（长昵称不好打，还费 token）。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能设别名。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            items = self.store.list_aliases()
+            if not items:
+                yield event.plain_result(
+                    "还没有人设别名。用法：/别名 <名字或短码> <短名>"
+                )
+                return
+            lines = [
+                f"#{item['id']} {item['alias']}（原名：{item['primary_name']}）"
+                for item in items
+            ]
+            yield event.plain_result("已设别名：\n" + "\n".join(lines))
+            return
+
+        target = argv[0]
+        candidates = self.store.resolve(target)
+        if not candidates:
+            yield event.plain_result(f"没找到「{target}」。")
+            return
+        if len(candidates) > 1:
+            cards = [self._card(self.store.get_identity(cid)) for cid in candidates[:6]]
+            yield event.plain_result(
+                "匹配到多个人，请用 #编号 指定：\n" + "\n".join(cards)
+            )
+            return
+        identity_id = candidates[0]
+        card = self.store.get_identity(identity_id)
+
+        if len(argv) == 1:
+            current = card.get("alias") or "（未设置）"
+            yield event.plain_result(
+                f"#{identity_id}｜原名：{card['primary_name']}｜别名：{current}\n"
+                f"设置：/别名 {target} <短名>　清空：/别名 {target} -"
+            )
+            return
+
+        content = " ".join(argv[1:]).strip()
+        if content in ("-", "清空", "删除"):
+            self.store.set_alias(identity_id, None)
+            yield event.plain_result(f"已清空「{card['primary_name']}」的别名。")
+            return
+
+        alias = valid_alias(content)
+        if alias is None:
+            yield event.plain_result(
+                f"别名不合格：要 1~{ALIAS_MAX_CHARS} 个字、单行、不能长得像 ID。"
+            )
+            return
+        owner = self.store.alias_owner(alias, exclude_id=identity_id)
+        if owner is not None:
+            owner_card = self.store.get_identity(owner)
+            yield event.plain_result(
+                f"别名「{alias}」已被 #{owner} {self._display(owner_card)} 占用，换一个。"
+            )
+            return
+        # 与别人的名字/曾用名重名会让 /谁 /备注 这类指令产生歧义，直接拦住。
+        if any(cid != identity_id for cid in self.store.resolve(alias)):
+            yield event.plain_result(
+                f"「{alias}」已经是别人的名字，换一个（避免 /谁 /备注 解析歧义）。"
+            )
+            return
+        self.store.set_alias(identity_id, alias)
+        yield event.plain_result(
+            f"已给 #{identity_id} 设别名「{alias}」（原名：{card['primary_name']}）。\n"
+            "名册注入、/谁、/备注 都已改用这个短名。"
         )
 
     @filter.command("忘记")
@@ -434,6 +520,6 @@ class IdentityPlugin(Star):
             return
         info = self.store.forget(candidates[0])
         yield event.plain_result(
-            f"已删除「{info['primary_name']}」的全部记录："
+            f"已删除「{info['display_name']}」的全部记录："
             f"{info['accounts']} 个账号、{info['names']} 个名字。"
         )

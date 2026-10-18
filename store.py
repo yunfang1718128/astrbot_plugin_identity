@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS groups (
 CREATE TABLE IF NOT EXISTS identities (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     primary_name TEXT NOT NULL,
+    alias        TEXT,
     source       INTEGER NOT NULL DEFAULT 0,
     note         TEXT,
     created_at   REAL NOT NULL,
@@ -85,6 +86,9 @@ SOURCE_LABEL = {
 # 其请求/通知事件则直接把昵称填成 QQ 号（已由 openid 比对拦住）。
 PLACEHOLDER_NAMES = {"n/a", "na", "null", "none", "unknown", "未知", "-", "无"}
 
+# 别名（管理员设的短名）长度上限：短名就是为了省 token 和好打字。
+ALIAS_MAX_CHARS = 12
+
 
 def valid_name(raw: str | None, openid: str) -> str | None:
     """过滤掉不能当人名的脏值。
@@ -112,6 +116,26 @@ def valid_name(raw: str | None, openid: str) -> str | None:
     if len(compact) >= 16 and all(c in "0123456789abcdefABCDEF" for c in compact):
         return None
     return name
+
+
+def valid_alias(raw: str | None, max_chars: int = ALIAS_MAX_CHARS) -> str | None:
+    """校验管理员别名：短、单行、不像 ID、不是平台兜底值。
+
+    别名是显示名，不写进 ``name_history``，所以这里不做 openid 比对
+    （别名本来就不该长得像 openid，见下方 ``is_openid_like``）。
+    """
+    if not raw:
+        return None
+    alias = str(raw).strip()
+    if not alias or len(alias) > max_chars:
+        return None
+    if "\n" in alias or "\r" in alias or "[At:" in alias or "<" in alias:
+        return None
+    if alias.lower() in PLACEHOLDER_NAMES:
+        return None
+    if is_openid_like(alias):
+        return None
+    return alias
 
 
 def is_openid_like(token: str) -> bool:
@@ -142,7 +166,9 @@ class IdentityStore:
         }
         if "note" not in columns:
             self.conn.execute("ALTER TABLE identities ADD COLUMN note TEXT")
-            self.conn.commit()
+        if "alias" not in columns:
+            self.conn.execute("ALTER TABLE identities ADD COLUMN alias TEXT")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -154,6 +180,45 @@ class IdentityStore:
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    def set_alias(self, identity_id: int, alias: str | None) -> bool:
+        """设置/清空管理员别名。别名只改显示名，不写进名字历史。"""
+        cur = self.conn.execute(
+            "UPDATE identities SET alias=? WHERE id=?", (alias or None, identity_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def alias_owner(self, alias: str, exclude_id: int | None = None) -> int | None:
+        """别名是否已被别人占用；占用则返回那个身份的 id。"""
+        token = (alias or "").strip()
+        if not token:
+            return None
+        row = self.conn.execute(
+            "SELECT id FROM identities WHERE alias=?", (token,)
+        ).fetchone()
+        if row is None:
+            return None
+        owner = int(row["id"])
+        if exclude_id is not None and owner == exclude_id:
+            return None
+        return owner
+
+    def list_aliases(self, limit: int = 30) -> list[dict[str, Any]]:
+        """已设别名的身份，按 id 排序（查看用）。"""
+        rows = self.conn.execute(
+            "SELECT id,alias,primary_name FROM identities"
+            " WHERE alias IS NOT NULL ORDER BY id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "alias": row["alias"],
+                "primary_name": row["primary_name"],
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------ 群
     def touch_group(self, group_openid: str, name: str | None = None) -> None:
@@ -331,6 +396,8 @@ class IdentityStore:
         return {
             "id": int(ident["id"]),
             "primary_name": ident["primary_name"],
+            "alias": ident["alias"],
+            "display_name": ident["alias"] or ident["primary_name"],
             "source": int(ident["source"]),
             "note": ident["note"],
             "created_at": ident["created_at"],
@@ -365,6 +432,8 @@ class IdentityStore:
         return {
             "id": identity_id,
             "primary_name": ident["primary_name"],
+            "alias": ident["alias"],
+            "display_name": ident["display_name"],
             "accounts": accounts,
             "names": names,
         }
@@ -388,11 +457,13 @@ class IdentityStore:
                 args.append(scope)
             sql += " ORDER BY identity_id"
             return [int(row["identity_id"]) for row in self.conn.execute(sql, args)]
+        # 名字与别名等价解析：/谁、/备注、/合并、/忘记 都能直接打短别名。
         sql = (
             "SELECT DISTINCT i.id FROM identities i"
-            " JOIN name_history n ON n.identity_id=i.id WHERE n.name=?"
+            " WHERE (i.alias=? OR EXISTS (SELECT 1 FROM name_history n"
+            "   WHERE n.identity_id=i.id AND n.name=?))"
         )
-        args = [token]
+        args: list[Any] = [token, token]
         if scope:
             sql += (
                 " AND EXISTS (SELECT 1 FROM accounts a"
@@ -470,6 +541,11 @@ class IdentityStore:
             self.conn.execute(
                 "UPDATE identities SET last_seen=? WHERE id=?", (now, keep_id)
             )
+        # 别名跟着并过去：自己没设过才被合并方覆盖，避免管理员设的短名丢失。
+        if not keep["alias"] and drop["alias"]:
+            self.conn.execute(
+                "UPDATE identities SET alias=? WHERE id=?", (drop["alias"], keep_id)
+            )
 
         self.conn.execute(
             "UPDATE accounts SET identity_id=? WHERE identity_id=?", (keep_id, drop_id)
@@ -482,11 +558,13 @@ class IdentityStore:
             "keep_before": {
                 "primary_name": keep["primary_name"],
                 "source": keep["source"],
+                "alias": keep["alias"],
             },
             "drop": {
                 "id": drop_id,
                 "primary_name": drop["primary_name"],
                 "source": drop["source"],
+                "alias": drop["alias"],
                 "created_at": drop["created_at"],
                 "last_seen": drop["last_seen"],
                 "names": drop_names,
@@ -513,11 +591,12 @@ class IdentityStore:
         drop = payload["drop"]
 
         self.conn.execute(
-            "INSERT INTO identities(id,primary_name,source,created_at,last_seen)"
-            " VALUES(?,?,?,?,?)",
+            "INSERT INTO identities(id,primary_name,alias,source,created_at,last_seen)"
+            " VALUES(?,?,?,?,?,?)",
             (
                 drop["id"],
                 drop["primary_name"],
+                drop.get("alias"),
                 drop["source"],
                 drop["created_at"],
                 drop["last_seen"],
@@ -548,8 +627,13 @@ class IdentityStore:
         before = payload.get("keep_before") or {}
         if before:
             self.conn.execute(
-                "UPDATE identities SET primary_name=?, source=? WHERE id=?",
-                (before["primary_name"], before["source"], payload["keep"]),
+                "UPDATE identities SET primary_name=?, source=?, alias=? WHERE id=?",
+                (
+                    before["primary_name"],
+                    before["source"],
+                    before.get("alias"),
+                    payload["keep"],
+                ),
             )
 
         self.conn.execute("UPDATE op_log SET undone=1 WHERE id=?", (row["id"],))
@@ -558,9 +642,13 @@ class IdentityStore:
 
     # -------------------------------------------------------------- 名册
     def roster(self, scope: str, since: float, limit: int) -> list[dict[str, Any]]:
-        """取某会话最近活跃的成员，按 identity id 排序以保证前缀稳定。"""
+        """取某会话最近活跃的成员，按 identity id 排序以保证前缀稳定。
+
+        ``name`` 是注入/展示用的名字：管理员设了别名就用别名（省 token、好认），
+        没设就用主名；``real_name`` 保留主名供卡片展示。
+        """
         rows = self.conn.execute(
-            "SELECT a.openid, i.id, i.primary_name, i.note FROM accounts a"
+            "SELECT a.openid, i.id, i.primary_name, i.alias, i.note FROM accounts a"
             " JOIN identities i ON i.id=a.identity_id"
             " WHERE a.scope=? AND a.last_seen>=?"
             " ORDER BY i.id LIMIT ?",
@@ -568,19 +656,27 @@ class IdentityStore:
         ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
-            aliases = [
-                item["name"]
-                for item in self.conn.execute(
-                    "SELECT name FROM name_history WHERE identity_id=? AND name<>?"
-                    " ORDER BY source DESC, last_seen DESC LIMIT 2",
-                    (row["id"], row["primary_name"]),
-                )
-            ]
+            display = row["alias"] or row["primary_name"]
+            # 有别名时不再罗列历史昵称：那正是管理员想甩掉的长文本。
+            aliases = (
+                []
+                if row["alias"]
+                else [
+                    item["name"]
+                    for item in self.conn.execute(
+                        "SELECT name FROM name_history WHERE identity_id=? AND name<>?"
+                        " ORDER BY source DESC, last_seen DESC LIMIT 2",
+                        (row["id"], row["primary_name"]),
+                    )
+                ]
+            )
             result.append(
                 {
                     "identity_id": int(row["id"]),
                     "openid": row["openid"],
-                    "name": row["primary_name"],
+                    "name": display,
+                    "real_name": row["primary_name"],
+                    "alias": row["alias"],
                     "note": row["note"],
                     "aliases": aliases,
                 }
@@ -594,4 +690,5 @@ class IdentityStore:
             "accounts": one("SELECT COUNT(*) FROM accounts"),
             "names": one("SELECT COUNT(*) FROM name_history"),
             "groups": one("SELECT COUNT(*) FROM groups"),
+            "aliases": one("SELECT COUNT(*) FROM identities WHERE alias IS NOT NULL"),
         }
