@@ -726,6 +726,53 @@ class IdentityStore:
             )
         return result
 
+    def relevant_members(
+        self,
+        scope: str,
+        since: float,
+        sender_openid: str | None,
+        at_openids: list[str] | None,
+        text: str,
+        scan_limit: int = 500,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """挑出本条消息真正该注入的成员（瘦身注入）。
+
+        顺序：当前发言人 → 被 @ 的人 → 正文里点名的已知成员。
+        返回 ``(选中的成员, 本会话共认识多少人)``；总数用于告诉模型
+        “还有其他人没列出来”，避免它以为群里只有这几个人。
+
+        只读、无副作用，且不依赖 AstrBot，方便在测试里直接验证。
+        """
+        members = self.roster(scope, since, scan_limit)
+        total = len(self.roster(scope, 0.0, scan_limit))
+        by_openid = {item["openid"]: item for item in members}
+        picked: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def take(openid: str | None) -> None:
+            if not openid or openid in seen:
+                return
+            item = by_openid.get(openid)
+            if item is None:
+                return
+            seen.add(openid)
+            picked.append(item)
+
+        take(sender_openid)
+        for openid in at_openids or []:
+            take(openid)
+
+        # 正文点名：名字/主名/曾用名都要能命中，单字名不参与（误匹配率太高）
+        if len(text) >= 2:
+            for item in members:
+                if item["openid"] in seen:
+                    continue
+                names = [item["name"], item["real_name"], *item["aliases"]]
+                if any(name and len(name) >= 2 and name in text for name in names):
+                    seen.add(item["openid"])
+                    picked.append(item)
+        return picked, total
+
     # ----------------------------------------------------------- 导入导出
     def export_data(self) -> dict[str, Any]:
         """把整个身份库导出成可序列化的 dict（/导出 用）。

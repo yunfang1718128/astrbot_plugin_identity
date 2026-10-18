@@ -23,6 +23,18 @@
         "default": 30,
         "hint": "最近 N 天在本会话说过话的人才进名册。"
     },
+    "slim_inject": {
+        "description": "🎯 只注入本条消息相关的人",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后不再每条消息都塞进全部活跃成员，只注入：当前发言人、被 @ 的人、正文里点名的已知成员，并且受字符预算限制。关掉则回到注入最近 N 人的全量名册——名册内容稳定，对 prompt cache 更友好，但人多时更费 token、也更稀释注意力。"
+    },
+    "roster_char_budget": {
+        "description": "瘦身模式的字符预算",
+        "type": "int",
+        "default": 240,
+        "hint": "相关成员拼起来超过这个长度就截断（至少 80）。只影响注入，不影响库里的数据。"
+    },
     "note_inject_enabled": {
         "description": "📝 把管理员备注注入名册",
         "type": "bool",

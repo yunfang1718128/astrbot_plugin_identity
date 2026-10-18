@@ -27,8 +27,12 @@ from store import (  # noqa: E402
 PLATFORM = "qq_official"
 GROUP_A = "AAAA0000BBBB1111CCCC2222DDDD3333"
 GROUP_B = "EEEE4444FFFF5555AAAA6666BBBB7777"
+GROUP_C = "CCCC8888DDDD9999EEEE0000FFFF1111"
 USER_A = "0123456789ABCDEF0123456789ABCDEF"
 USER_B = "FEDCBA9876543210FEDCBA9876543210"
+USER_C1 = "11111111222222223333333344444444"
+USER_C2 = "55555555666666667777777788888888"
+USER_C3 = "99999999AAAABBBBCCCCDDDDEEEEFFFF"
 
 
 def check(label: str, got, expect) -> None:
@@ -273,6 +277,44 @@ def test_export_import(store: IdentityStore, identity_id: int) -> None:
             other.close()
 
 
+def test_relevant_members(store: IdentityStore, identity_id: int) -> None:
+    section("名册瘦身：相关成员选择")
+    store.touch_account(PLATFORM, GROUP_C, USER_C1, "甲同学")
+    id2, _ = store.touch_account(PLATFORM, GROUP_C, USER_C2, "乙同学")
+    id3, _ = store.touch_account(PLATFORM, GROUP_C, USER_C3, "丙同学")
+    store.set_alias(id3, "阿丙")
+
+    picked, total = store.relevant_members(GROUP_C, 0, USER_C1, [], "")
+    check("只含发言人", [p["openid"] for p in picked], [USER_C1])
+    check("总数统计", total, 3)
+
+    picked, _ = store.relevant_members(GROUP_C, 0, None, [USER_C2], "")
+    check("按 @ 选人", [p["openid"] for p in picked], [USER_C2])
+
+    picked, _ = store.relevant_members(GROUP_C, 0, USER_C1, [USER_C1], "")
+    check("发言人与 @ 重复不叠加", len(picked), 1)
+
+    picked, _ = store.relevant_members(GROUP_C, 0, None, [], "乙同学在吗")
+    check("正文点名主名", [p["openid"] for p in picked], [USER_C2])
+
+    picked, _ = store.relevant_members(GROUP_C, 0, None, [], "阿丙呢")
+    check("正文点名别名", [p["openid"] for p in picked], [USER_C3])
+
+    picked, _ = store.relevant_members(GROUP_C, 0, USER_C1, [USER_C2], "乙同学和丙同学")
+    check("发言人 + @ + 点名去重排序", len(picked), 3)
+    check("发言人排第一", picked[0]["openid"], USER_C1)
+
+    picked, _ = store.relevant_members(GROUP_C, 0, None, [], "今天天气不错")
+    check("没点名就不注入", picked, [])
+
+    check("单字别名不参与匹配", store.relevant_members(GROUP_C, 0, None, [], "阿")[0], [])
+
+    # 清场，避免影响后面的删除/名册断言
+    for cid in (id2, id3):
+        store.forget(cid)
+    store.forget(store.resolve("甲同学")[0])
+
+
 def test_migration() -> None:
     """旧库（无 note 列）升级后不能丢数据。"""
     section("旧库迁移")
@@ -324,6 +366,7 @@ def main() -> None:
             test_alias_merge(store, identity_id)
             test_listing(store, identity_id)
             test_export_import(store, identity_id)
+            test_relevant_members(store, identity_id)
             test_forget_and_roster(store, identity_id)
             section("统计")
             print(" ", store.stats())

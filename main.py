@@ -152,6 +152,56 @@ class IdentityPlugin(Star):
 
     # -------------------------------------------------------------- 注入
     @filter.on_llm_request()
+    @staticmethod
+    def _at_openids(event: AstrMessageEvent) -> list[str]:
+        """消息链里被 @ 的 openid（QQ 官方号 ``At.qq`` 就是 openid）。"""
+        result: list[str] = []
+        try:
+            for comp in event.message_obj.message or []:
+                if comp.__class__.__name__ != "At":
+                    continue
+                qq = getattr(comp, "qq", None)
+                if qq:
+                    result.append(str(qq))
+        except Exception:  # 组件结构变化不能影响注入
+            return result
+        return result
+
+    def _relevant_lines(
+        self, event: AstrMessageEvent, platform: str, scope: str
+    ) -> list[str]:
+        """瘦身注入：只列本条消息相关的人，并受字符预算约束。"""
+        days = int(self.config.get("roster_days", 30))
+        since = time.time() - days * 86400
+        sender = event.get_sender_id()
+        picked, total = self.store.relevant_members(
+            scope,
+            since,
+            sender,
+            self._at_openids(event),
+            event.message_str or "",
+        )
+        budget = max(80, int(self.config.get("roster_char_budget", 240)))
+        lines: list[str] = []
+        used = 0
+        for item in picked:
+            line = f"{self._short(item['openid'])}={item['name']}"
+            if item["aliases"]:
+                line += f"（曾用名：{'、'.join(item['aliases'])}）"
+            line += self._note_suffix(item.get("note"))
+            if sender and item["openid"] == sender:
+                line += "（当前发言人）"
+            if lines and used + len(line) > budget:
+                break
+            lines.append(line)
+            used += len(line)
+        if total > len(lines):
+            lines.append(
+                f"（本群共认识 {total} 人，此处只列相关的 {len(lines)} 人；"
+                "其余的人要用 /谁 查）"
+            )
+        return lines
+
     async def inject_roster(self, event: AstrMessageEvent, req: Any) -> None:
         """把身份信息塞进 system prompt —— 前缀稳定，prompt cache 才命中。"""
         if not self._enabled() or not self.config.get("inject_enabled", True):
@@ -172,6 +222,8 @@ class IdentityPlugin(Star):
                     if not own.get("alias") and own["aliases"]:
                         head += f"（曾用名：{'、'.join(own['aliases'][:3])}）"
                     lines.append(head + self._note_suffix(own.get("note")))
+            elif self.config.get("slim_inject", True):
+                lines.extend(self._relevant_lines(event, platform, scope))
             else:
                 days = int(self.config.get("roster_days", 30))
                 limit = int(self.config.get("roster_max", 20))

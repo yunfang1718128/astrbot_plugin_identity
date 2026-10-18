@@ -17,8 +17,8 @@ desc: |
   - **私聊借用映射**：私聊没有昵称，但 openid 能对上就认得出
   - **跨群人工合并**：官方 `member_openid` 每群不同，自动关联不可能，提供
     `/合并` 与 `/撤销` 让管理员手动指认
-  - **名册注入**：只注入本会话活跃成员（默认 20 人，约 300 tokens），
-    写进 system prompt 前缀，DeepSeek 等支持 prompt cache 的模型能命中
+  - **名册注入**：默认只注入本条消息相关的人（发言人 / 被 @ / 正文点名），
+    受字符预算限制；可关闭回到“最近 20 人”全量名册
   - **短别名**：管理员可给任何人设 1~12 字的别名，长昵称不再塞满提示词，
     别名同时可用于 `/谁` `/备注` `/合并` `/忘记`
   - **可查可备份**：`/名单` 分页看全部人，`/曾用名` 看改名时间线，
@@ -29,7 +29,7 @@ desc: |
   只存 `openid`、昵称、首次/最近出现时间，**不存任何聊天内容**。
   数据落在 `data/plugin_data/astrbot_plugin_identity/identity.db`，
   管理员可随时用 `/忘记` 彻底删除某人记录，也可在配置里加「不记录名单」。
-version: "1.3.0"
+version: "1.4.0"
 author: "yunfang1718128"
 repo: https://github.com/yunfang1718128/astrbot_plugin_identity
 astrbot_version: ">=4.9.2"
