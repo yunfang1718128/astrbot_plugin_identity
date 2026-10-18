@@ -220,6 +220,49 @@ class IdentityStore:
             for row in rows
         ]
 
+    def count_identities(self) -> int:
+        return int(
+            self.conn.execute("SELECT COUNT(*) FROM identities").fetchone()[0]
+        )
+
+    def page_identities(self, limit: int = 10, offset: int = 0) -> list[dict[str, Any]]:
+        """分页列出身份（/名单 用），按最近活跃排序。"""
+        rows = self.conn.execute(
+            "SELECT i.id, i.primary_name, i.alias, i.note, i.last_seen,"
+            " (SELECT COUNT(*) FROM accounts a WHERE a.identity_id=i.id) AS n_accounts"
+            " FROM identities i ORDER BY i.last_seen DESC, i.id LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "primary_name": row["primary_name"],
+                "alias": row["alias"],
+                "display_name": row["alias"] or row["primary_name"],
+                "note": row["note"],
+                "last_seen": row["last_seen"],
+                "accounts": int(row["n_accounts"]),
+            }
+            for row in rows
+        ]
+
+    def name_history(self, identity_id: int) -> list[dict[str, Any]]:
+        """某人的全部名字及来源/时间（/曾用名 用）。"""
+        rows = self.conn.execute(
+            "SELECT name,source,first_seen,last_seen FROM name_history"
+            " WHERE identity_id=? ORDER BY first_seen, id",
+            (identity_id,),
+        ).fetchall()
+        return [
+            {
+                "name": row["name"],
+                "source": int(row["source"]),
+                "first_seen": row["first_seen"],
+                "last_seen": row["last_seen"],
+            }
+            for row in rows
+        ]
+
     # ------------------------------------------------------------------ 群
     def touch_group(self, group_openid: str, name: str | None = None) -> None:
         """登记一次群出现；仅当已有记录没有名字时才用传入名字补齐。"""
@@ -681,6 +724,139 @@ class IdentityStore:
                     "aliases": aliases,
                 }
             )
+        return result
+
+    # ----------------------------------------------------------- 导入导出
+    def export_data(self) -> dict[str, Any]:
+        """把整个身份库导出成可序列化的 dict（/导出 用）。
+
+        不导出内部自增 id 与 op_log：导入端重建 id，合并历史在那里无意义。
+        """
+        identities: list[dict[str, Any]] = []
+        for row in self.conn.execute(
+            "SELECT id,primary_name,alias,source,note,created_at,last_seen"
+            " FROM identities ORDER BY id"
+        ):
+            identities.append(
+                {
+                    "primary_name": row["primary_name"],
+                    "alias": row["alias"],
+                    "source": int(row["source"]),
+                    "note": row["note"],
+                    "created_at": row["created_at"],
+                    "last_seen": row["last_seen"],
+                    "accounts": [
+                        {
+                            "platform": a["platform"],
+                            "scope": a["scope"],
+                            "openid": a["openid"],
+                        }
+                        for a in self.conn.execute(
+                            "SELECT platform,scope,openid FROM accounts"
+                            " WHERE identity_id=? ORDER BY id",
+                            (row["id"],),
+                        )
+                    ],
+                    "names": [
+                        {"name": n["name"], "source": int(n["source"])}
+                        for n in self.conn.execute(
+                            "SELECT name,source FROM name_history"
+                            " WHERE identity_id=? ORDER BY id",
+                            (row["id"],),
+                        )
+                    ],
+                }
+            )
+        return {
+            "schema": 1,
+            "plugin": "astrbot_plugin_identity",
+            "exported_at": time.time(),
+            "stats": self.stats(),
+            "identities": identities,
+        }
+
+    def import_data(self, payload: dict[str, Any]) -> dict[str, int]:
+        """合并导入：已有账号不重建，缺的补齐；不覆盖本机已设的别名/备注。"""
+        result = {"identities": 0, "accounts": 0, "names": 0, "skipped": 0}
+        items = payload.get("identities")
+        if not isinstance(items, list):
+            raise ValueError("文件格式不对：缺少 identities 数组")
+        now = time.time()
+        for item in items:
+            if not isinstance(item, dict):
+                result["skipped"] += 1
+                continue
+            name = str(item.get("primary_name") or "").strip()
+            accounts = [
+                acc
+                for acc in (item.get("accounts") or [])
+                if isinstance(acc, dict)
+                and acc.get("platform")
+                and acc.get("scope")
+                and acc.get("openid")
+            ]
+            if not name or not accounts:
+                result["skipped"] += 1
+                continue
+
+            # 先看这个人在本机是否已存在（任一账号命中即认为是同一个人）
+            identity_id: int | None = None
+            for acc in accounts:
+                existing = self.conn.execute(
+                    "SELECT identity_id FROM accounts"
+                    " WHERE platform=? AND scope=? AND openid=?",
+                    (acc["platform"], acc["scope"], acc["openid"]),
+                ).fetchone()
+                if existing is not None:
+                    identity_id = int(existing["identity_id"])
+                    break
+            if identity_id is None:
+                identity_id = self._create_identity(
+                    name, int(item.get("source") or SOURCE_NICKNAME), now
+                )
+                result["identities"] += 1
+
+            current = self.conn.execute(
+                "SELECT alias,note FROM identities WHERE id=?", (identity_id,)
+            ).fetchone()
+            alias = item.get("alias")
+            if alias and current is not None and not current["alias"]:
+                if self.alias_owner(str(alias), exclude_id=identity_id) is None:
+                    self.set_alias(identity_id, str(alias))
+            note = item.get("note")
+            if note and current is not None and not current["note"]:
+                self.set_note(identity_id, str(note)[:60])
+
+            for acc in accounts:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM accounts"
+                    " WHERE platform=? AND scope=? AND openid=?",
+                    (acc["platform"], acc["scope"], acc["openid"]),
+                ).fetchone()
+                if exists is not None:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO accounts"
+                    "(platform,scope,openid,identity_id,first_seen,last_seen)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (acc["platform"], acc["scope"], acc["openid"], identity_id, now, now),
+                )
+                result["accounts"] += 1
+            self.conn.commit()
+
+            for name_item in item.get("names") or []:
+                if not isinstance(name_item, dict):
+                    continue
+                raw = str(name_item.get("name") or "").strip()
+                if not raw:
+                    continue
+                before = self.conn.execute(
+                    "SELECT 1 FROM name_history WHERE identity_id=? AND name=?",
+                    (identity_id, raw),
+                ).fetchone()
+                if before is None:
+                    result["names"] += 1
+                self.record_name(identity_id, raw, int(name_item.get("source") or 0))
         return result
 
     def stats(self) -> dict[str, int]:

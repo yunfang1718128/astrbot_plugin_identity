@@ -1,7 +1,8 @@
 """认人本自测：零第三方依赖，直接 ``python tests/test_store.py`` 运行。
 
 覆盖：脏名过滤、跨 scope 自动归并、改名不覆盖主名、来源等级升级、三种解析方式、
-合并与撤销、删除、名册生成、管理员别名。任何一项失败都会抛 AssertionError 并以非零码退出。
+合并与撤销、删除、名册生成、管理员别名、名单分页、导出导入。
+任何一项失败都会抛 AssertionError 并以非零码退出。
 """
 
 from __future__ import annotations
@@ -218,6 +219,60 @@ def test_alias_merge(store: IdentityStore, identity_id: int) -> None:
     store.forget(other_id)
 
 
+def test_listing(store: IdentityStore, identity_id: int) -> None:
+    section("名单与曾用名")
+    total = store.count_identities()
+    check("身份总数", total >= 1, True)
+    first = store.page_identities(10, 0)
+    check("首页不超 10 条", len(first) <= 10, True)
+    check("首页条数等于 min(总数,10)", len(first), min(total, 10))
+    check("偏移到头为空", store.page_identities(10, total), [])
+
+    card = store.get_identity(identity_id)
+    history = store.name_history(identity_id)
+    check("曾用名含主名", any(h["name"] == card["primary_name"] for h in history), True)
+    check("曾用名带时间", all(h["first_seen"] > 0 for h in history), True)
+    check("曾用名拼起来不漏", len(history) >= 1, True)
+
+
+def test_export_import(store: IdentityStore, identity_id: int) -> None:
+    section("导出与导入")
+    data = store.export_data()
+    check("导出 schema", data["schema"], 1)
+    check("导出人数与库一致", len(data["identities"]), store.stats()["identities"])
+    check("导出含账号", sum(len(i["accounts"]) for i in data["identities"]), store.stats()["accounts"])
+    check("导出不泄内部 id", "id" in data["identities"][0], False)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        other = IdentityStore(os.path.join(tmp, "other.db"))
+        try:
+            result = other.import_data(data)
+            check("导入人数", other.stats()["identities"], store.stats()["identities"])
+            check("导入账号数", other.stats()["accounts"], store.stats()["accounts"])
+            check("导入名字数", other.stats()["names"], store.stats()["names"])
+            check("导入返回值一致", result["identities"], store.stats()["identities"])
+            check(
+                "别名跟着导入",
+                other.get_identity(other.resolve(store.get_identity(identity_id)["alias"])[0])["alias"]
+                if store.get_identity(identity_id)["alias"]
+                else "无别名可导",
+                store.get_identity(identity_id)["alias"] or "无别名可导",
+            )
+
+            again = other.import_data(data)
+            check("重复导入不新增人", again["identities"], 0)
+            check("重复导入不新增账号", again["accounts"], 0)
+            check("重复导入不新增名字", again["names"], 0)
+
+            try:
+                other.import_data({"identities": "不是数组"})
+                check("坏格式应报错", "没报错", "ValueError")
+            except ValueError:
+                check("坏格式报错", True, True)
+        finally:
+            other.close()
+
+
 def test_migration() -> None:
     """旧库（无 note 列）升级后不能丢数据。"""
     section("旧库迁移")
@@ -267,6 +322,8 @@ def main() -> None:
             test_note(store, identity_id)
             test_alias(store, identity_id)
             test_alias_merge(store, identity_id)
+            test_listing(store, identity_id)
+            test_export_import(store, identity_id)
             test_forget_and_roster(store, identity_id)
             section("统计")
             print(" ", store.stats())

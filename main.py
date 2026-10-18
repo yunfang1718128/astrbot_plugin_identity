@@ -18,6 +18,7 @@ QQ 官方号的身份信息很残缺，实测结论：
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ class IdentityPlugin(Star):
         super().__init__(context)
         self.config = config
         data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        self.data_dir = data_dir
         self.store = IdentityStore(
             data_dir / "identity.db",
             placeholder_prefix=self.config.get("placeholder_prefix", "群友-"),
@@ -79,6 +81,13 @@ class IdentityPlugin(Star):
     @staticmethod
     def _short(openid: str) -> str:
         return openid[:8]
+
+    @staticmethod
+    def _when(ts: float | None) -> str:
+        """时间戳 → 「月-日 时:分」，本地时区。"""
+        if not ts:
+            return "未知"
+        return time.strftime("%m-%d %H:%M", time.localtime(float(ts)))
 
     @staticmethod
     def _display(identity: dict[str, Any] | None, fallback: str = "（未知）") -> str:
@@ -495,6 +504,153 @@ class IdentityPlugin(Star):
         yield event.plain_result(
             f"已给 #{identity_id} 设别名「{alias}」（原名：{card['primary_name']}）。\n"
             "名册注入、/谁、/备注 都已改用这个短名。"
+        )
+
+    @filter.command("名单")
+    async def list_people(self, event: AstrMessageEvent):
+        """管理员：分页列出身份库里的人。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能看名单。")
+            return
+        argv = self._argv(event)[1:]
+        page = 1
+        if argv:
+            raw = argv[0].lstrip("#")
+            if not raw.isdigit():
+                yield event.plain_result("用法：/名单 [页码]，每页 10 人。")
+                return
+            page = max(1, int(raw))
+        total = self.store.count_identities()
+        if total == 0:
+            yield event.plain_result("身份库还是空的。")
+            return
+        size = 10
+        pages = (total + size - 1) // size
+        page = min(page, pages)
+        rows = self.store.page_identities(size, (page - 1) * size)
+        lines = []
+        for row in rows:
+            head = f"#{row['id']} {row['display_name']}"
+            if row["alias"]:
+                head += f"（原名：{row['primary_name']}）"
+            line = f"{head}｜{row['accounts']} 个账号｜{self._when(row['last_seen'])}"
+            if row["note"]:
+                line += f"｜{row['note'][:20]}"
+            lines.append(line)
+        tail = f"\n下一页：/名单 {page + 1}" if page < pages else ""
+        yield event.plain_result(
+            f"身份库 {total} 人（第 {page}/{pages} 页）\n" + "\n".join(lines) + tail
+        )
+
+    @filter.command("曾用名")
+    async def name_history(self, event: AstrMessageEvent):
+        """管理员：看某人用过的全部名字与时间线。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能查名字历史。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result("用法：/曾用名 <名字 或 短码 或 #编号>")
+            return
+        token = " ".join(argv)
+        candidates = self.store.resolve(token)
+        if not candidates:
+            yield event.plain_result(f"没找到「{token}」。")
+            return
+        if len(candidates) > 1:
+            cards = [self._card(self.store.get_identity(cid)) for cid in candidates[:6]]
+            yield event.plain_result(
+                "匹配到多个人，请用 #编号 指定：\n" + "\n".join(cards)
+            )
+            return
+        identity_id = candidates[0]
+        card = self.store.get_identity(identity_id)
+        history = self.store.name_history(identity_id)
+        if not history:
+            yield event.plain_result(
+                f"#{identity_id} {self._display(card)} 还没学到名字（只有占位名）。"
+            )
+            return
+        lines = []
+        for item in history:
+            label = SOURCE_LABEL.get(item["source"], str(item["source"]))
+            line = (
+                f"{item['name']}（{label}）"
+                f" {self._when(item['first_seen'])} → {self._when(item['last_seen'])}"
+            )
+            if item["name"] == card["primary_name"]:
+                line += "　← 当前主名"
+            lines.append(line)
+        yield event.plain_result(
+            f"#{identity_id} {self._display(card)} 的名字时间线：\n" + "\n".join(lines)
+        )
+
+    @filter.command("导出")
+    async def export_backup(self, event: AstrMessageEvent):
+        """管理员：把身份库导出成 JSON（落在插件数据目录）。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能导出。")
+            return
+        try:
+            data = self.store.export_data()
+            filename = time.strftime("identity-export-%Y%m%d-%H%M%S.json")
+            path = self.data_dir / filename
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning(f"[identity] 导出失败: {exc}")
+            yield event.plain_result(f"导出失败：{exc}")
+            return
+        stats = data["stats"]
+        yield event.plain_result(
+            f"已导出 {stats['identities']} 人 / {stats['accounts']} 个账号 / "
+            f"{stats['names']} 个名字到：\n{path}\n"
+            f"取回：scp aliyun:{path} ."
+        )
+
+    @filter.command("导入")
+    async def import_backup(self, event: AstrMessageEvent):
+        """管理员：从数据目录里的导出文件合并导入。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能导入。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            files = sorted(
+                p.name for p in self.data_dir.glob("identity-export-*.json")
+            )
+            if not files:
+                yield event.plain_result(
+                    "数据目录里没有导出文件。先在本机 /导出 再 /导入 <文件名>。"
+                )
+                return
+            yield event.plain_result(
+                "用法：/导入 <文件名>\n可用：\n" + "\n".join(files[-10:])
+            )
+            return
+
+        filename = argv[0]
+        if "/" in filename or "\\" in filename or ".." in filename:
+            yield event.plain_result("只接受数据目录里的文件名，不能带路径。")
+            return
+        path = self.data_dir / filename
+        if not path.is_file():
+            yield event.plain_result(f"找不到文件：{filename}")
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            yield event.plain_result(f"文件解析失败：{exc}")
+            return
+        try:
+            result = self.store.import_data(payload)
+        except ValueError as exc:
+            yield event.plain_result(f"导入失败：{exc}")
+            return
+        yield event.plain_result(
+            f"导入完成：新增 {result['identities']} 人、{result['accounts']} 个账号、"
+            f"{result['names']} 个名字，跳过 {result['skipped']} 条。"
         )
 
     @filter.command("忘记")
