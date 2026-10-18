@@ -2,6 +2,13 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.2] - 2026-10-18
+
+### 变更
+
+- `support_platforms` 收紧为仅 `qq_official`
+- aiocqhttp 按源码核对应该可用，但尚未实测，因此不写入声明（README 保留说明与 PR 指引）
+
 ## [1.1.1] - 2026-10-18
 
 ### 修复

@@ -25,13 +25,15 @@ desc: |
   只存 `openid`、昵称、首次/最近出现时间，**不存任何聊天内容**。
   数据落在 `data/plugin_data/astrbot_plugin_identity/identity.db`，
   管理员可随时用 `/忘记` 彻底删除某人记录，也可在配置里加「不记录名单」。
-version: "1.1.1"
+version: "1.1.2"
 author: "yunfang1718128"
 repo: https://github.com/yunfang1718128/astrbot_plugin_identity
 astrbot_version: ">=4.9.2"
 support_platforms:
   - qq_official
-  - aiocqhttp
+# aiocqhttp 按源码核对应该可用（且私聊有昵称），但尚未在真实 OneBot 连接上实测，
+# 因此先不声明支持。实测通过后取消下面这行注释并 bump 一个版本即可。
+#  - aiocqhttp
 social_link: https://github.com/yunfang1718128
 tags:
   - identity
