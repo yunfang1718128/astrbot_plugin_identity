@@ -1,0 +1,387 @@
+"""认人本：记住「谁是哪个 openid」。
+
+为什么需要这个插件
+------------------
+QQ 官方号的身份信息很残缺，实测结论：
+
+- **群聊**：网关会带 ``author.username``，AstrBot 补丁后能拿到昵称（历史 289 条群消息
+  全部有名字），这是目前唯一稳定的名字来源。
+- **私聊**：C2C 协议只有 ``user_openid``，**永远没有昵称**。
+- **群成员列表/详情 API 未开放**（官方标注"内邀接入中"），所以只能被动学习，
+  不能主动拉名单。
+- **同一个人的 member_openid 在不同群不同**（官方"唯一身份机制"明示），
+  所以跨群同一人**只能人工合并**。
+
+因此本插件做三件事：群聊被动学名、私聊借用映射、管理员手动绑定与合并。
+它只管「身份」，不管「事件记忆」（那是 livingmemory 的职责）。
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star
+from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.star.star_tools import StarTools
+
+from .store import (
+    SOURCE_ADMIN,
+    SOURCE_LABEL,
+    IdentityStore,
+)
+
+PLUGIN_NAME = "astrbot_plugin_identity"
+SCOPE_PRIVATE = "c2c"
+
+
+class IdentityPlugin(Star):
+    """openid ↔ 人名 的持久记忆。"""
+
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
+        super().__init__(context)
+        self.config = config
+        data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        self.store = IdentityStore(
+            data_dir / "identity.db",
+            placeholder_prefix=self.config.get("placeholder_prefix", "群友-"),
+        )
+
+    async def terminate(self) -> None:
+        self.store.close()
+
+    # ---------------------------------------------------------------- 工具
+    def _enabled(self) -> bool:
+        return bool(self.config.get("enable", True))
+
+    def _protected(self, openid: str) -> bool:
+        ids = self.config.get("protected_ids", []) or []
+        return openid in {str(item).strip() for item in ids}
+
+    @staticmethod
+    def _scope(event: AstrMessageEvent) -> str:
+        """当前会话作用域：群 openid，或 c2c。"""
+        return event.get_group_id() or SCOPE_PRIVATE
+
+    @staticmethod
+    def _argv(event: AstrMessageEvent) -> list[str]:
+        """把 '/我是 云帆少年' 拆成 ['我是', '云帆少年']。"""
+        text = (event.message_str or "").strip()
+        while text[:1] in ("/",):
+            text = text[1:].lstrip()
+        return text.split()
+
+    @staticmethod
+    def _short(openid: str) -> str:
+        return openid[:8]
+
+    def _card(self, identity: dict[str, Any]) -> str:
+        """把身份渲染成一行人类可读的卡。"""
+        aliases = "、".join(identity["aliases"][:4])
+        head = f"#{identity['id']} {identity['primary_name']}"
+        if aliases:
+            head += f"（别名：{aliases}）"
+        scopes = "，".join(
+            f"{'私聊' if scope == SCOPE_PRIVATE else scope[:8]}={self._short(openid)}"
+            for scope, openid, _ in identity["accounts"][:4]
+        )
+        source = SOURCE_LABEL.get(identity["source"], str(identity["source"]))
+        return f"{head}｜{scopes}｜名字来源：{source}"
+
+    # ------------------------------------------------------------ 被动学习
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def learn(self, event: AstrMessageEvent) -> None:
+        """每条消息都顺手学一次：谁、在哪个群、叫什么。"""
+        if not self._enabled():
+            return
+        try:
+            openid = event.get_sender_id()
+            if not openid or openid == event.get_self_id():
+                return
+            if self._protected(openid):
+                return
+
+            platform = event.get_platform_name()
+            scope = self._scope(event)
+            group = getattr(event.message_obj, "group", None)
+            if scope != SCOPE_PRIVATE and group is not None:
+                group_name = getattr(group, "group_name", None)
+                self.store.touch_group(scope, group_name)
+
+            self.store.touch_account(
+                platform=platform,
+                scope=scope,
+                openid=openid,
+                nickname=event.get_sender_name(),
+            )
+        except Exception as exc:  # 学习失败绝不能影响正常对话
+            logger.warning(f"[identity] 学习身份失败: {exc}")
+
+    # -------------------------------------------------------------- 注入
+    @filter.on_llm_request()
+    async def inject_roster(self, event: AstrMessageEvent, req: Any) -> None:
+        """把身份信息塞进 system prompt —— 前缀稳定，prompt cache 才命中。"""
+        if not self._enabled() or not self.config.get("inject_enabled", True):
+            return
+        try:
+            platform = event.get_platform_name()
+            scope = self._scope(event)
+            openid = event.get_sender_id()
+            lines: list[str] = []
+
+            own_id = self.store.identity_of(platform, scope, openid) if openid else None
+            if scope == SCOPE_PRIVATE:
+                # 私聊没有昵称，唯一有用的是「当前这个人是谁」
+                own = self.store.get_identity(own_id) if own_id else None
+                if own is not None and own["source"] > 0:
+                    aliases = "、".join(own["aliases"][:3])
+                    lines.append(
+                        f"当前对话者：{own['primary_name']}"
+                        + (f"（别名：{aliases}）" if aliases else "")
+                    )
+            else:
+                days = int(self.config.get("roster_days", 30))
+                limit = int(self.config.get("roster_max", 20))
+                since = time.time() - days * 86400
+                for item in self.store.roster(scope, since, limit):
+                    line = f"{self._short(item['openid'])}={item['name']}"
+                    if item["aliases"]:
+                        line += f"（别名：{'、'.join(item['aliases'])}）"
+                    lines.append(line)
+                if own_id and all(
+                    not line.startswith(self._short(openid)) for line in lines
+                ):
+                    own = self.store.get_identity(own_id)
+                    if own is not None:
+                        lines.append(
+                            f"{self._short(openid)}={own['primary_name']}（当前发言人）"
+                        )
+
+            if lines:
+                req.system_prompt += (
+                    "\n\n### 群成员身份表（短码=人名）\n"
+                    "以下短码是群成员的唯一标识，可用它指代具体的人；"
+                    "表里没有的人，直接问或让对方自报，不要猜。\n"
+                    + "\n".join(lines)
+                    + "\n"
+                )
+        except Exception as exc:
+            logger.warning(f"[identity] 注入名册失败: {exc}")
+
+    # -------------------------------------------------------------- 指令
+    @filter.command("我是谁")
+    async def whoami(self, event: AstrMessageEvent):
+        """查看自己的 openid 与已识别的身份。"""
+        openid = event.get_sender_id()
+        if not openid:
+            yield event.plain_result("拿不到你的 openid，这个平台可能不支持。")
+            return
+        scope = self._scope(event)
+        where = "私聊" if scope == SCOPE_PRIVATE else f"群 {self._short(scope)}"
+        platform = event.get_platform_name()
+        identity_id = self.store.identity_of(platform, scope, openid)
+        body = self.store.get_identity(identity_id) if identity_id else None
+        if body is None or body["source"] == 0:
+            yield event.plain_result(
+                f"{where}｜你的短码：{self._short(openid)}\n我还不认识你。管理员可用 "
+                f"/我是 {where if scope != SCOPE_PRIVATE else '群短码'} 你的名字 来登记。"
+            )
+            return
+        yield event.plain_result(f"{where}｜{self._card(body)}")
+
+    @filter.command("我是")
+    async def i_am(self, event: AstrMessageEvent):
+        """管理员：把当前身份绑定到某人。用法 /我是 <名字> 或 /我是 <群> <名字>。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能改身份库。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result(
+                "用法：/我是 <名字>\n      /我是 <群名或群短码> <名字>\n"
+                "先 /群列表 看群短码。"
+            )
+            return
+
+        platform = event.get_platform_name()
+        scope = self._scope(event)
+        openid = event.get_sender_id()
+
+        look_scope: str | None = None
+        name = argv[-1]
+        if len(argv) >= 2:
+            group = self.store.find_group(argv[0])
+            if group is None:
+                yield event.plain_result(
+                    f"找不到群「{argv[0]}」。用 /群列表 查看已知群及短码。"
+                )
+                return
+            look_scope = group["group_openid"]
+
+        candidates = self.store.resolve(name, scope=look_scope)
+        if not candidates:
+            yield event.plain_result(
+                f"没找到叫「{name}」的人。可能需要先让对方在群里说句话让我学到他。"
+            )
+            return
+        if len(candidates) > 1:
+            lines = [self._card(self.store.get_identity(cid)) for cid in candidates[:6]]
+            yield event.plain_result(
+                "同名的人有多个，请用 #编号 指定：\n" + "\n".join(lines)
+            )
+            return
+
+        target_id = candidates[0]
+        current_id = self.store.identity_of(platform, scope, openid)
+        self.store.record_name(target_id, name, SOURCE_ADMIN)
+
+        if current_id is None:
+            yield event.plain_result(
+                f"你这条消息还没被登记（可能刚重启），再说一句话后再试一次。"
+            )
+            return
+        if current_id == target_id:
+            yield event.plain_result(f"已经对上了：{self._card(self.store.get_identity(target_id))}")
+            return
+
+        result = self.store.merge(
+            keep_id=min(target_id, current_id),
+            drop_id=max(target_id, current_id),
+            operator=f"{platform}:{openid}",
+        )
+        merged = self.store.get_identity(result["keep"])
+        yield event.plain_result(
+            f"对上了：{self._card(merged)}\n（本次合并可用 /撤销 回滚）"
+        )
+
+    @filter.command("群名")
+    async def name_group(self, event: AstrMessageEvent):
+        """管理员：给当前群起一个中文名，方便私聊里寻址。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能命名群。")
+            return
+        if self._scope(event) == SCOPE_PRIVATE:
+            yield event.plain_result("这条指令要在群里发。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result("用法：/群名 某某群")
+            return
+        scope = self._scope(event)
+        new_name = " ".join(argv)
+        self.store.set_group_name(scope, new_name)
+        yield event.plain_result(f"已把本群记作「{new_name}」，短码 {self._short(scope)}。")
+
+    @filter.command("群列表")
+    async def list_groups(self, event: AstrMessageEvent):
+        """管理员：查看已知群。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能看群列表。")
+            return
+        groups = self.store.list_groups()
+        if not groups:
+            yield event.plain_result("还没记录到任何群。")
+            return
+        lines = []
+        for row in groups[:20]:
+            count = len(self.store.roster(row["group_openid"], 0, 999))
+            lines.append(
+                f"{self._short(row['group_openid'])}｜{row['name'] or '（未命名）'}"
+                f"｜认识 {count} 人"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("谁")
+    async def who_is(self, event: AstrMessageEvent):
+        """管理员：按名字 / 短码 / #编号 查身份卡。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能查身份库。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result("用法：/谁 <名字 或 短码 或 #编号>")
+            return
+        token = " ".join(argv)
+        candidates = self.store.resolve(token)
+        if not candidates:
+            yield event.plain_result(f"没找到「{token}」。")
+            return
+        cards = [self._card(self.store.get_identity(cid)) for cid in candidates[:8]]
+        suffix = "" if len(candidates) <= 8 else f"\n…共 {len(candidates)} 条"
+        yield event.plain_result("\n".join(cards) + suffix)
+
+    @filter.command("合并")
+    async def merge_people(self, event: AstrMessageEvent):
+        """管理员：把两个身份合并成一个人（跨群关联）。用法 /合并 A B。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能合并身份。")
+            return
+        argv = self._argv(event)[1:]
+        if len(argv) != 2:
+            yield event.plain_result("用法：/合并 <A> <B>，A/B 可以是名字、短码或 #编号。")
+            return
+        resolved: list[int] = []
+        for token in argv:
+            found = self.store.resolve(token)
+            if len(found) != 1:
+                yield event.plain_result(
+                    f"「{token}」匹配到 {len(found)} 个身份，请用 /谁 {token} 查明后用 #编号 指定。"
+                )
+                return
+            resolved.append(found[0])
+        if resolved[0] == resolved[1]:
+            yield event.plain_result("这两个指的是同一个人，不用合并。")
+            return
+        keep_id, drop_id = min(resolved), max(resolved)
+        result = self.store.merge(keep_id, drop_id, f"{event.get_platform_name()}:{event.get_sender_id()}")
+        merged = self.store.get_identity(result["keep"])
+        moved = len(result["accounts"])
+        yield event.plain_result(
+            f"已合并：{self._card(merged)}\n搬了 {moved} 个账号、"
+            f"{len(result['added_names'])} 个新名字。可用 /撤销 回滚。"
+        )
+
+    @filter.command("撤销")
+    async def undo(self, event: AstrMessageEvent):
+        """管理员：回滚最近一次合并。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能回滚。")
+            return
+        payload = self.store.undo_last(f"{event.get_platform_name()}:{event.get_sender_id()}")
+        if payload is None:
+            yield event.plain_result("没有可撤销的合并。")
+            return
+        restored = self.store.get_identity(payload["drop"]["id"])
+        yield event.plain_result(
+            f"已回滚，拆回：{self._card(restored) if restored else payload['drop']['primary_name']}"
+        )
+
+    @filter.command("忘记")
+    async def forget(self, event: AstrMessageEvent):
+        """管理员：彻底删除某人的身份记录（数据删除权）。"""
+        if not event.is_admin():
+            yield event.plain_result("只有管理员能删除身份记录。")
+            return
+        argv = self._argv(event)[1:]
+        if not argv:
+            yield event.plain_result("用法：/忘记 <名字 或 短码 或 #编号>")
+            return
+        token = " ".join(argv)
+        candidates = self.store.resolve(token)
+        if not candidates:
+            yield event.plain_result(f"没找到「{token}」。")
+            return
+        if len(candidates) > 1:
+            cards = [self._card(self.store.get_identity(cid)) for cid in candidates[:6]]
+            yield event.plain_result(
+                "匹配到多个人，请用 #编号 指定要删除哪个：\n" + "\n".join(cards)
+            )
+            return
+        info = self.store.forget(candidates[0])
+        yield event.plain_result(
+            f"已删除「{info['primary_name']}」的全部记录："
+            f"{info['accounts']} 个账号、{info['names']} 个名字。"
+        )

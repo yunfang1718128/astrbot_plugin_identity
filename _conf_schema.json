@@ -1,0 +1,38 @@
+{
+    "enable": {
+        "description": "✅ 启用认人本",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不再学习新名字，也不再向模型注入名册；已存数据保留。"
+    },
+    "inject_enabled": {
+        "description": "📇 把名册注入系统提示词",
+        "type": "bool",
+        "default": true,
+        "hint": "群聊注入本群活跃成员，私聊只注入当前对话者本人的身份卡。关闭后模型只能靠 ID 猜人。"
+    },
+    "roster_max": {
+        "description": "名册人数上限",
+        "type": "int",
+        "default": 20,
+        "hint": "只注入最近活跃的前 N 人，约每人 15~20 tokens。人数越多越费 token 也越稀释注意力。"
+    },
+    "roster_days": {
+        "description": "活跃判定天数",
+        "type": "int",
+        "default": 30,
+        "hint": "最近 N 天在本会话说过话的人才进名册。"
+    },
+    "placeholder_prefix": {
+        "description": "未知名字时的占位前缀",
+        "type": "text",
+        "default": "群友-",
+        "hint": "拿不到昵称时用「前缀 + openid 前 6 位」占位，例如 群友-6844E3。之后学到真名会自动升级。"
+    },
+    "protected_ids": {
+        "description": "🙈 不记录名单（openid）",
+        "type": "list",
+        "default": [],
+        "hint": "填 openid，命中者不学习昵称、不进名册、不参与合并。留空表示全部记录。"
+    }
+}

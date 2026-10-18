@@ -1,0 +1,41 @@
+name: "astrbot_plugin_identity"
+display_name: "认人本"
+short_desc: "记住谁是谁：openid ↔ 人名的持久映射，专治拿不到昵称的平台"
+desc: |
+  让 AstrBot 真正「记住」谁是谁，而不是每轮都靠昵称猜。
+
+  **解决什么问题**
+
+  QQ 官方号（`qq_official`）拿不到稳定身份：私聊完全没有昵称，群聊昵称时有时无，
+  用户 ID 是 per-bot 的 hex `openid`，同一个人在不同群的 `member_openid` 还不同，
+  群成员列表 API 至今未开放。结果是机器人经常认错人、改名就失忆、私聊里跟个陌生人一样。
+
+  本插件把这些碎片拼成一张持久的名册：
+
+  - **群聊被动学习**：每条群消息顺手记下 `openid → 昵称`，无需配置映射表
+  - **改名留史**：昵称变了只追加别名，主名不被覆盖，历史可追溯
+  - **私聊借用映射**：私聊没有昵称，但 openid 能对上就认得出
+  - **跨群人工合并**：官方 `member_openid` 每群不同，自动关联不可能，提供
+    `/合并` 与 `/撤销` 让管理员手动指认
+  - **名册注入**：只注入本会话活跃成员（默认 20 人，约 300 tokens），
+    写进 system prompt 前缀，DeepSeek 等支持 prompt cache 的模型能命中
+
+  **数据与隐私**
+
+  只存 `openid`、昵称、首次/最近出现时间，**不存任何聊天内容**。
+  数据落在 `data/plugin_data/astrbot_plugin_identity/identity.db`，
+  管理员可随时用 `/忘记` 彻底删除某人记录，也可在配置里加「不记录名单」。
+version: "1.0.0"
+author: "yunfang1718128"
+repo: https://github.com/yunfang1718128/astrbot_plugin_identity
+astrbot_version: ">=4.9.2"
+support_platforms:
+  - qq_official
+  - aiocqhttp
+social_link: https://github.com/yunfang1718128
+tags:
+  - identity
+  - openid
+  - nickname
+  - qq_official
+  - admin

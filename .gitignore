@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行时数据：身份库绝不应进版本库
+*.db
+*.db-wal
+*.db-shm
+
+.venv/
+venv/
+.env
+
+.idea/
+.vscode/
+.DS_Store
+*.log
