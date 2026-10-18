@@ -197,8 +197,7 @@ class IdentityPlugin(Star):
             used += len(line)
         if total > len(lines):
             lines.append(
-                f"（本群共认识 {total} 人，此处只列相关的 {len(lines)} 人；"
-                "其余的人要用 /谁 查）"
+                f"（本群共认识 {total} 人，此处只列相关的 {len(lines)} 人，其余未列出）"
             )
         return lines
 
