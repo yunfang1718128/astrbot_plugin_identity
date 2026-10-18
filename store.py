@@ -80,6 +80,11 @@ SOURCE_LABEL = {
     SOURCE_ADMIN: "指定",
 }
 
+# 各平台适配器在拿不到昵称时的兜底值，均不能当人名。
+# aiocqhttp 在 sender 既无 card 也无 nickname 时会填 "N/A"，
+# 其请求/通知事件则直接把昵称填成 QQ 号（已由 openid 比对拦住）。
+PLACEHOLDER_NAMES = {"n/a", "na", "null", "none", "unknown", "未知", "-", "无"}
+
 
 def valid_name(raw: str | None, openid: str) -> str | None:
     """过滤掉不能当人名的脏值。
@@ -98,6 +103,9 @@ def valid_name(raw: str | None, openid: str) -> str | None:
         return None
     # 消息组件残留
     if "[At:" in name or "<" in name or "\n" in name:
+        return None
+    # 平台兜底占位值
+    if name.strip().lower() in PLACEHOLDER_NAMES:
         return None
     # 长 hex 串：多半是 ID 变体
     compact = name.replace(" ", "")

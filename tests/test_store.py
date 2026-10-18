@@ -50,6 +50,9 @@ def test_dirty_names() -> None:
         (USER_A[:8] + "尾巴", False),
         ("[At:123]", False),
         ("abcdef0123456789ab", False),  # 长 hex 串
+        ("N/A", False),  # aiocqhttp 兜底值
+        ("null", False),
+        ("未知", False),
         ("路人", True),
         ("x" * 40, False),
     ]
