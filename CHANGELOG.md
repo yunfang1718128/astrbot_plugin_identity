@@ -2,6 +2,17 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.1] - 2026-10-19
+
+### 修复
+
+- **1.4.0 把 `@filter.on_llm_request()` 装饰器盖错了地方**：新增 `_at_openids()` 时插到了
+  装饰器和 `inject_roster()` 之间，导致装饰器绑到了 `_at_openids` 上。后果有两个——
+  `inject_roster()` 失去注册，**名册从此完全不再注入**（机器人认错人、群里没人被认出来）；
+  而 `_at_openids` 是同步 `staticmethod`，AstrBot 的 `call_event_hook` 要求钩子必须是协程，
+  于是**每条消息都抛一次 `AssertionError`**（日志 `pipeline.context_utils:103`）。
+- 装饰器移回 `inject_roster()`，`_at_openids()` 恢复为纯工具函数。
+
 ## [1.4.0] - 2026-10-19
 
 ### 变更

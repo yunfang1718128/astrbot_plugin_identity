@@ -151,7 +151,6 @@ class IdentityPlugin(Star):
             logger.warning(f"[identity] 学习身份失败: {exc}")
 
     # -------------------------------------------------------------- 注入
-    @filter.on_llm_request()
     @staticmethod
     def _at_openids(event: AstrMessageEvent) -> list[str]:
         """消息链里被 @ 的 openid（QQ 官方号 ``At.qq`` 就是 openid）。"""
@@ -201,6 +200,7 @@ class IdentityPlugin(Star):
             )
         return lines
 
+    @filter.on_llm_request()
     async def inject_roster(self, event: AstrMessageEvent, req: Any) -> None:
         """把身份信息塞进 system prompt —— 前缀稳定，prompt cache 才命中。"""
         if not self._enabled() or not self.config.get("inject_enabled", True):
